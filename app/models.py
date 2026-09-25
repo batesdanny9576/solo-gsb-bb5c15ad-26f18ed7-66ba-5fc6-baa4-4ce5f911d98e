@@ -5,6 +5,19 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+class Numbering(BaseModel):
+    """一种标签的可选流水号设置。
+
+    排版完成后按页码、页内从上到下再从左到右的实际位置为该规格的
+    每个已排入标签分配连续整数：first + 0、first + 1……
+    标签内部显示 prefix + str(整数).zfill(pad)；未排入的份数不消耗编号。
+    """
+
+    prefix: str = Field("", max_length=20, description="流水号前缀")
+    start: int = Field(1, ge=0, description="起始整数（含），不能为负")
+    pad: int = Field(0, ge=0, le=12, description="数字部分补零位数；0 表示不补零")
+
+
 class LabelSpec(BaseModel):
     """一种标签规格及其需要的份数。"""
 
@@ -13,6 +26,9 @@ class LabelSpec(BaseModel):
     height: float = Field(..., gt=0, description="标签高度 mm")
     count: int = Field(..., ge=1, description="需要份数")
     allow_rotate: bool = Field(False, description="是否允许旋转 90 度排版")
+    numbering: Numbering | None = Field(
+        None, description="流水号设置；为 null 时不编号，保持原有标注"
+    )
 
 
 class OccupiedZone(BaseModel):
@@ -46,7 +62,11 @@ class LayoutRequest(BaseModel):
 
 
 class PlacedLabel(BaseModel):
-    """单个已排入标签（毫米坐标，原点为纸张左上角）。"""
+    """单个已排入标签（毫米坐标，原点为纸张左上角）。
+
+    serial 仅对启用了流水号的规格非空，值为含前缀、补零后的最终编号；
+    同一规格跨页连续，旋转、首页占用区与续页都不会跳号或重号。
+    """
 
     type_index: int
     name: str
@@ -55,6 +75,7 @@ class PlacedLabel(BaseModel):
     width: float
     height: float
     rotated: bool
+    serial: str | None = None
 
 
 class PageLayout(BaseModel):
@@ -73,6 +94,13 @@ class LabelSummary(BaseModel):
     placed: int
     rotated: int
     unplaced: int
+    numbered: bool = False
+    number_first: str | None = Field(
+        None, description="启用流水号时本次实际排入的首个编号（未排入为 null）"
+    )
+    number_last: str | None = Field(
+        None, description="启用流水号时本次实际排入的末个编号（未排入为 null）"
+    )
 
 
 class LayoutResponse(BaseModel):

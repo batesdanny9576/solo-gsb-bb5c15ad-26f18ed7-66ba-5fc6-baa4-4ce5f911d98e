@@ -29,6 +29,36 @@ from .models import (
 EPS = 1e-6
 
 
+def format_serial(prefix: str, value: int, pad: int) -> str:
+    """生成最终编号：前缀 + 起始整数补零（pad=0 不补零，位数超出不截断）。"""
+    digits = str(value)
+    if pad > 0:
+        digits = digits.zfill(pad)
+    return f"{prefix}{digits}"
+
+
+def _reading_order(
+    labels: list[PlacedLabel],
+) -> list[PlacedLabel]:
+    """页内阅读顺序：从上到下成行，同一行内从左到右。
+
+    天际线装箱中，同一逻辑行的标签顶边 y 取自同一条天际线高度，必然
+    相等（PlacedLabel 坐标已经两位小数舍入）；而短标签塞进高标签之间
+    下方空隙时会有自己更小的 y，属于独立一行。因此按顶边 y 聚类成行、
+    行内按左边 x 排序即可正确还原阅读位置。旋转只交换宽高，不影响 y。
+    """
+    rows: list[list[PlacedLabel]] = []
+    for lab in sorted(labels, key=lambda l: (l.y, l.x)):
+        if rows and abs(rows[-1][-1].y - lab.y) <= EPS:
+            rows[-1].append(lab)
+        else:
+            rows.append([lab])
+    result: list[PlacedLabel] = []
+    for row in rows:
+        result.extend(sorted(row, key=lambda l: l.x))
+    return result
+
+
 def _r(v: float) -> float:
     """输出坐标统一保留 2 位小数，避免 SVG 里出现长浮点。"""
     return round(v + 0.0, 2)
@@ -315,6 +345,29 @@ def compute_layout(req: LayoutRequest) -> LayoutResponse:
         if not progressed:
             sky = new_page()
 
+    # 流水号分配：跨页连续，按页码 → 页内从上到下、同排从左到右的
+    # 实际排版位置分配。旋转、首页占用区避让、续页都只改变标签位置，
+    # 不影响计数器，因此同一规格既不跳号也不重号；未排入的份数（remaining
+    # 中未被放置的部分）从不参与计数，不消耗编号。
+    counters = [
+        spec.numbering.start if spec.numbering is not None else 0
+        for spec in req.labels
+    ]
+    first_serial: list[str | None] = [None] * len(req.labels)
+    last_serial: list[str | None] = [None] * len(req.labels)
+    for pg in pages:
+        for lab in _reading_order(pg.labels):
+            i = lab.type_index
+            num = req.labels[i].numbering
+            if num is None:
+                continue
+            serial = format_serial(num.prefix, counters[i], num.pad)
+            lab.serial = serial
+            if first_serial[i] is None:
+                first_serial[i] = serial
+            last_serial[i] = serial
+            counters[i] += 1
+
     summaries = [
         LabelSummary(
             type_index=i,
@@ -325,6 +378,9 @@ def compute_layout(req: LayoutRequest) -> LayoutResponse:
             placed=placed_count[i],
             rotated=rotated_count[i],
             unplaced=spec.count - placed_count[i],
+            numbered=spec.numbering is not None,
+            number_first=first_serial[i],
+            number_last=last_serial[i],
         )
         for i, spec in enumerate(req.labels)
     ]

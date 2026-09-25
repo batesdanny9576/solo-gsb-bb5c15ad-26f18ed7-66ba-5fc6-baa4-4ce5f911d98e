@@ -11,21 +11,44 @@ let calibrationData = null;  // 已通过求解校验的校准录入（导出时
 /* ---------------- 标签行 ---------------- */
 
 function addLabelRow(spec) {
-  const data = spec || { name: "", width: 60, height: 30, count: 10, allow_rotate: false };
-  const row = document.createElement("div");
-  row.className = "label-row";
-  row.innerHTML = `
-    <input type="text" class="l-name" placeholder="标签名称" value="${escapeAttr(data.name)}" />
-    <input type="number" class="l-w" value="${data.width}" step="0.5" min="0.1" title="宽 mm" />
-    <input type="number" class="l-h" value="${data.height}" step="0.5" min="0.1" title="高 mm" />
-    <input type="number" class="l-c" value="${data.count}" step="1" min="1" title="份数" />
-    <label class="rot-cell" title="允许旋转 90°">
-      <input type="checkbox" class="l-r" ${data.allow_rotate ? "checked" : ""} />旋转
-    </label>
-    <button type="button" class="del" title="删除">✕</button>
+  const data = spec || {
+    name: "", width: 60, height: 30, count: 10, allow_rotate: false,
+    numbering: null,
+  };
+  const num = data.numbering || { prefix: "", start: 1, pad: 3 };
+  const block = document.createElement("div");
+  block.className = "label-block";
+  block.innerHTML = `
+    <div class="label-row">
+      <input type="text" class="l-name" placeholder="标签名称" value="${escapeAttr(data.name)}" />
+      <input type="number" class="l-w" value="${data.width}" step="0.5" min="0.1" title="宽 mm" />
+      <input type="number" class="l-h" value="${data.height}" step="0.5" min="0.1" title="高 mm" />
+      <input type="number" class="l-c" value="${data.count}" step="1" min="1" title="份数" />
+      <label class="rot-cell" title="允许旋转 90°">
+        <input type="checkbox" class="l-r" ${data.allow_rotate ? "checked" : ""} />旋转
+      </label>
+      <label class="num-cell" title="启用连续流水号，编号印在标签内部">
+        <input type="checkbox" class="l-num" ${data.numbering ? "checked" : ""} />编号
+      </label>
+      <button type="button" class="del" title="删除">✕</button>
+    </div>
+    <div class="numbering-row" ${data.numbering ? "" : "hidden"}>
+      <label class="np-prefix">前缀
+        <input type="text" class="n-prefix" value="${escapeAttr(num.prefix)}" placeholder="如 P-" maxlength="20" />
+      </label>
+      <label class="np-start">起始整数
+        <input type="number" class="n-start" value="${num.start}" step="1" min="0" />
+      </label>
+      <label class="np-pad">补零位数
+        <input type="number" class="n-pad" value="${num.pad}" step="1" min="0" max="12" />
+      </label>
+    </div>
   `;
-  row.querySelector(".del").addEventListener("click", () => row.remove());
-  $("label-rows").appendChild(row);
+  block.querySelector(".del").addEventListener("click", () => block.remove());
+  block.querySelector(".l-num").addEventListener("change", (e) => {
+    block.querySelector(".numbering-row").hidden = !e.target.checked;
+  });
+  $("label-rows").appendChild(block);
 }
 
 function escapeAttr(s) {
@@ -67,13 +90,26 @@ function num(id) {
 }
 
 function collectParams() {
-  const labels = [...document.querySelectorAll(".label-row")].map((row) => ({
-    name: row.querySelector(".l-name").value.trim(),
-    width: parseFloat(row.querySelector(".l-w").value),
-    height: parseFloat(row.querySelector(".l-h").value),
-    count: parseInt(row.querySelector(".l-c").value, 10),
-    allow_rotate: row.querySelector(".l-r").checked,
-  }));
+  const labels = [...document.querySelectorAll(".label-block")].map((block) => {
+    const row = block.querySelector(".label-row");
+    const spec = {
+      name: row.querySelector(".l-name").value.trim(),
+      width: parseFloat(row.querySelector(".l-w").value),
+      height: parseFloat(row.querySelector(".l-h").value),
+      count: parseInt(row.querySelector(".l-c").value, 10),
+      allow_rotate: row.querySelector(".l-r").checked,
+      numbering: null,
+    };
+    if (row.querySelector(".l-num").checked) {
+      const nrow = block.querySelector(".numbering-row");
+      spec.numbering = {
+        prefix: nrow.querySelector(".n-prefix").value,
+        start: parseInt(nrow.querySelector(".n-start").value, 10),
+        pad: parseInt(nrow.querySelector(".n-pad").value, 10),
+      };
+    }
+    return spec;
+  });
   const occupied_zones = [...document.querySelectorAll(".zone-row")].map((row) => ({
     x: parseFloat(row.querySelector(".z-x").value),
     y: parseFloat(row.querySelector(".z-y").value),
@@ -112,6 +148,19 @@ function validateParams(p) {
       bad(`占用区越界：Y + 高 = ${+(z.y + z.height).toFixed(2)}mm，超过纸张高度 ${p.page_height}mm。`);
     }
   }
+  for (const lab of p.labels) {
+    if (!lab.numbering) continue;
+    const n = lab.numbering;
+    if (!Number.isInteger(n.start) || n.start < 0) {
+      bad(`标签「${lab.name || "未命名"}」的编号起始整数必须是不小于 0 的整数。`);
+    }
+    if (!Number.isInteger(n.pad) || n.pad < 0 || n.pad > 12) {
+      bad(`标签「${lab.name || "未命名"}」的补零位数必须是 0–12 之间的整数。`);
+    }
+    if (typeof n.prefix !== "string" || [...n.prefix].length > 20) {
+      bad(`标签「${lab.name || "未命名"}」的编号前缀不能超过 20 个字符。`);
+    }
+  }
 }
 
 async function apiError(resp, fallback) {
@@ -145,9 +194,15 @@ async function fetchSvg(page, { showOccupied = false, withCalibration = false } 
 
 async function renderPage() {
   if (!lastPlan) return;
-  // 预览显示灰色占用区（仅第一页有），与下载/打印的 SVG 坐标完全一致
-  const svg = await fetchSvg(currentPage, { showOccupied: true });
-  $("svg-host").innerHTML = svg;
+  const host = $("svg-host");
+  try {
+    // 预览显示灰色占用区（仅第一页有），与下载/打印的 SVG 坐标完全一致
+    const svg = await fetchSvg(currentPage, { showOccupied: true });
+    host.innerHTML = svg;
+  } catch (err) {
+    host.innerHTML =
+      `<div class="svg-error"><strong>无法生成本页 SVG：</strong>${escapeHtml(err.message)}</div>`;
+  }
   $("page-info").textContent = `${currentPage} / ${lastPlan.pages.length}`;
   $("prev-page").disabled = currentPage <= 1;
   $("next-page").disabled = currentPage >= lastPlan.pages.length;
@@ -170,9 +225,19 @@ function renderSummary(plan) {
     </div>
     <table>
       <thead><tr>
-        <th>标签</th><th>规格 (mm)</th><th>需求</th><th>排入</th><th>其中旋转</th><th>未排入</th>
+        <th>标签</th><th>规格 (mm)</th><th>需求</th><th>排入</th><th>其中旋转</th><th>未排入</th><th>本次编号范围</th>
       </tr></thead><tbody>`;
   for (const s of plan.summaries) {
+    let range = "—";
+    if (s.numbered) {
+      if (s.number_first === null || s.number_last === null) {
+        range = `<span class="muted-num">已启用，本次无排入（不消耗编号）</span>`;
+      } else if (s.number_first === s.number_last) {
+        range = `<span class="num-range">${escapeHtml(s.number_first)}</span>`;
+      } else {
+        range = `<span class="num-range">${escapeHtml(s.number_first)} – ${escapeHtml(s.number_last)}</span>`;
+      }
+    }
     html += `<tr class="${s.unplaced > 0 ? "unplaced" : ""}">
       <td>${escapeHtml(s.name || `#${s.type_index + 1}`)}</td>
       <td>${s.width} × ${s.height}</td>
@@ -180,6 +245,7 @@ function renderSummary(plan) {
       <td>${s.placed}</td>
       <td>${s.rotated}</td>
       <td>${s.unplaced > 0 ? s.unplaced : "—"}</td>
+      <td class="num-cell-out">${range}</td>
     </tr>`;
   }
   html += "</tbody></table>";
@@ -446,9 +512,15 @@ $("print-all").addEventListener("click", async () => {
 
 /* ---------------- 初始数据 ---------------- */
 
-addLabelRow({ name: "品名标签", width: 60, height: 30, count: 20, allow_rotate: true });
+addLabelRow({
+  name: "品名标签", width: 60, height: 30, count: 20, allow_rotate: true,
+  numbering: { prefix: "P-", start: 1, pad: 3 },
+});
 addLabelRow({ name: "箱贴", width: 100, height: 70, count: 6, allow_rotate: false });
-addLabelRow({ name: "小标", width: 40, height: 20, count: 50, allow_rotate: true });
+addLabelRow({
+  name: "小标", width: 40, height: 20, count: 50, allow_rotate: true,
+  numbering: { prefix: "", start: 100, pad: 0 },
+});
 
 // 按默认纸张尺寸预填校准测试页的设计坐标（实测列留空）
 refreshCalMarks("");

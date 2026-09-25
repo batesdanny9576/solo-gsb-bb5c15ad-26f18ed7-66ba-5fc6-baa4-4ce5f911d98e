@@ -165,6 +165,144 @@ def main() -> int:
     _expect_error(OccupiedZone(x=10, y=250, width=10, height=60))
     _expect_error(OccupiedZone(x=-1, y=0, width=10, height=10))
 
+    # ---- 流水号：阅读顺序、跨页连续、旋转/占用区不跳号、未排入不消耗 ----
+    from .layout import format_serial
+    from .models import Numbering
+
+    assert format_serial("P-", 1, 3) == "P-001"
+    assert format_serial("", 42, 0) == "42"
+    assert format_serial("X", 100, 2) == "X100"  # 位数超出补零位不截断
+    assert format_serial("X", 5, 4) == "X0005"
+
+    def _num(prefix="P-", start=1, pad=3) -> Numbering:
+        return Numbering(prefix=prefix, start=start, pad=pad)
+
+    # 2×2 网格：编号按 页内从上到下成行、行内从左到右 分配
+    grid = LayoutRequest(
+        page_width=100, page_height=100,
+        labels=[LabelSpec(width=50, height=50, count=4, numbering=_num())],
+    )
+    gp = compute_layout(grid)
+    g0 = gp.pages[0].labels
+    assert [(l.x, l.y, l.serial) for l in g0] == [
+        (0, 0, "P-001"), (50, 0, "P-002"),
+        (0, 50, "P-003"), (50, 50, "P-004"),
+    ], [(l.x, l.y, l.serial) for l in g0]
+    gs = gp.summaries[0]
+    assert gs.numbered and gs.number_first == "P-001" and gs.number_last == "P-004"
+
+    # 跨页连续：40×100 纸面 20×20 标签，首页 10 个，续页 2 个
+    paged = LayoutRequest(
+        page_width=40, page_height=100,
+        labels=[LabelSpec(width=20, height=20, count=12, numbering=_num())],
+    )
+    pp = compute_layout(paged)
+    assert len(pp.pages) == 2
+    all_serials = [
+        l.serial for pg in pp.pages for l in
+        sorted(pg.labels, key=lambda l: (l.y, l.x))
+    ]
+    assert all_serials == [f"P-{i:03d}" for i in range(1, 13)], all_serials
+    assert pp.summaries[0].number_last == "P-012"
+
+    # 多规格各自独立计数（同一版面内交错放置，编号互不干扰）
+    two = LayoutRequest(
+        page_width=40, page_height=40,
+        labels=[
+            LabelSpec(width=20, height=20, count=2,
+                      numbering=_num("A-", 1, 3)),
+            LabelSpec(width=20, height=20, count=2,
+                      numbering=_num("B-", 1, 3)),
+        ],
+    )
+    tp = compute_layout(two)
+    by_pos = {(l.x, l.y): l.serial for l in tp.pages[0].labels}
+    assert by_pos == {
+        (0, 0): "A-001", (20, 0): "B-001",
+        (0, 20): "A-002", (20, 20): "B-002",
+    }, by_pos
+
+    # 未启用编号：serial 为空，汇总保持原字段
+    plain = LayoutRequest(
+        page_width=40, page_height=40,
+        labels=[LabelSpec(width=20, height=20, count=1)],
+    )
+    plain_plan = compute_layout(plain)
+    assert plain_plan.pages[0].labels[0].serial is None
+    assert plain_plan.summaries[0].numbered is False
+    assert plain_plan.summaries[0].number_first is None
+
+    # 完全排不下（份数未排入）：不消耗任何编号
+    unfit = LayoutRequest(
+        page_width=100, page_height=100,
+        labels=[
+            LabelSpec(name="巨标", width=200, height=200, count=3,
+                      numbering=_num())
+        ],
+    )
+    up = compute_layout(unfit)
+    assert up.summaries[0].placed == 0
+    assert up.summaries[0].number_first is None
+    assert up.summaries[0].number_last is None
+    assert all(l.serial is None for pg in up.pages for l in pg.labels)
+
+    # 首页占用区 + 续页：40 份编号恰好 001–040 各一次，不跳号不重号
+    occ_num = LayoutRequest(
+        page_width=210, page_height=297,
+        margin_top=8, margin_right=8, margin_bottom=8, margin_left=8,
+        gap_x=2, gap_y=2,
+        labels=[LabelSpec(name="编号避让", width=50, height=30, count=40,
+                          numbering=_num())],
+        occupied_zones=[OccupiedZone(x=48, y=48, width=100, height=100)],
+    )
+    onp = compute_layout(occ_num)
+    occ_serials = [l.serial for pg in onp.pages for l in pg.labels]
+    assert sorted(occ_serials) == [f"P-{i:03d}" for i in range(1, 41)]
+    assert len(occ_serials) == len(set(occ_serials)) == 40
+
+    # 旋转排版下编号仍按实际位置连续分配
+    rot = LayoutRequest(
+        page_width=30, page_height=120,
+        labels=[LabelSpec(name="转标", width=50, height=20, count=6,
+                          allow_rotate=True, numbering=_num())],
+    )
+    rp = compute_layout(rot)
+    rot_serials = [l.serial for pg in rp.pages for l in pg.labels]
+    assert sorted(rot_serials) == [f"P-{i:03d}" for i in range(1, 7)]
+    assert any(l.rotated for pg in rp.pages for l in pg.labels)
+
+    # SVG 内显示同一编号（预览与导出同源）；未编号标签无 serial 文本
+    grid_svg = build_svg(gp, 1, show_occupied=False)
+    for s in ("P-001", "P-002", "P-003", "P-004"):
+        assert f">{s}</text>" in grid_svg, f"SVG 缺少编号 {s}"
+    assert 'class="serial"' in grid_svg
+    plain_svg = build_svg(plain_plan, 1)
+    assert 'class="serial"' not in plain_svg
+
+    # 编号放不进标签：最小字号仍越界时明确报错，不输出 SVG
+    too_long = LayoutRequest(
+        page_width=100, page_height=100,
+        labels=[
+            LabelSpec(name="小签", width=10, height=10, count=1,
+                      numbering=_num("ABCDEFGH-", 1, 4))
+        ],
+    )
+    try:
+        build_svg(compute_layout(too_long), 1)
+    except ValueError as exc:
+        assert "放不进标签" in str(exc), str(exc)
+    else:
+        raise AssertionError("编号越界却未报错")
+
+    # 小标签放短编号正常；校准导出路径同样包含编号文本
+    short_num = LayoutRequest(
+        page_width=100, page_height=100,
+        labels=[LabelSpec(width=10, height=10, count=1,
+                          numbering=_num("", 7, 2))],
+    )
+    short_plan = compute_layout(short_num)
+    assert ">07</text>" in build_svg(short_plan, 1, show_annotations=False)
+
     # ---- 打印位置校准：拟合、逆变换修正与三类拦截 ----
     def _lines(scale: float, offset: float) -> list[CalibrationLine]:
         return [
@@ -194,6 +332,10 @@ def main() -> int:
     assert build_svg(plan, 1, True, True, False) == build_svg(
         plan, 1, True, True, False, calibration=None
     )
+
+    # 启用流水号时校准导出同样携带编号（编号字号不随校准缩放）
+    assert ">07</text>" in build_svg(short_plan, 1, calibration=cal)
+    assert 'class="serial"' in build_svg(short_plan, 1, calibration=cal)
 
     # 基准点重合：设计坐标重复 / 实测坐标全部相同，均拒绝
     def _expect_cal_error(data: CalibrationData, key: str) -> None:

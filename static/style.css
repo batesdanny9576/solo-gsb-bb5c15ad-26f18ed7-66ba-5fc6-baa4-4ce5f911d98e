@@ -67,19 +67,37 @@ input[type="number"], select {
   font-size: 14px;
 }
 
+.label-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+  background: #fafbfc;
+}
 .label-row {
   display: grid;
-  grid-template-columns: 1.2fr repeat(3, 1fr) 0.8fr auto;
+  grid-template-columns: 1.2fr repeat(3, 1fr) 0.7fr 0.7fr auto;
   gap: 6px;
   align-items: center;
-  margin-bottom: 8px;
 }
 .label-row input[type="checkbox"] { width: auto; }
-.label-row .rot-cell { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+.label-row .rot-cell, .label-row .num-cell {
+  display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted);
+}
 .label-row .del {
   border: none; background: none; color: var(--danger);
   font-size: 18px; cursor: pointer; padding: 0 4px;
 }
+.numbering-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1fr;
+  gap: 8px;
+  margin: 8px 0 2px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.numbering-row label { display: block; }
+.numbering-row input { margin-top: 3px; }
 
 .hint {
   margin: 0 0 8px; font-size: 12px; line-height: 1.5; color: var(--muted);
@@ -129,6 +147,9 @@ button:disabled { opacity: 0.45; cursor: default; }
 .summary th:first-child, .summary td:first-child { text-align: left; }
 .summary tr.unplaced td { color: var(--danger); }
 .summary .ok { color: var(--ok); font-weight: 600; }
+.summary .num-range { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 600; }
+.summary .muted-num { color: var(--muted); font-size: 12px; }
+.summary td.num-cell-out { text-align: center; white-space: nowrap; }
 .summary .warn {
   margin-top: 10px; padding: 8px 10px; border-radius: 6px;
   background: #fef3c7; color: #92400e; font-size: 13px;
@@ -147,6 +168,16 @@ button:disabled { opacity: 0.45; cursor: default; }
   display: flex; justify-content: center;
   background: #e9eaee; border-radius: 8px; padding: 16px;
   min-height: 300px;
+}
+.svg-error {
+  align-self: center;
+  max-width: 480px;
+  padding: 14px 16px;
+  border-radius: 8px;
+  background: #fee2e2;
+  color: #991b1b;
+  font-size: 14px;
+  line-height: 1.6;
 }
 .svg-host svg {
   width: auto; height: auto; max-width: 100%;

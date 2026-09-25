@@ -14,10 +14,17 @@ calibration，坐标与 /api/layout 返回完全一致。
 角线不会侵入邻签、占用区或画到纸外。判定一律在最终 SVG 坐标空间
 进行：应用走纸校准时，邻签、占用区与纸边都按逆变换补偿后的坐标
 参与避让。标签轮廓本身、排版数量与位置不随角线避让改变。
+
+流水号：排版结果中 serial 非空的标签在内部居中绘制同一编号
+（预览、下载与打印完全相同，因为都来自这份排版结果）。字号在
+最终坐标空间按标签补偿后的内框自动选取；即便最小可读字号，编号
+仍会超出标签内宽时抛出明确中文错误（/api/svg 返回 400），绝不
+输出越界文字。未启用编号的标签保持「名称 + 尺寸」原标注。
 """
 
 from __future__ import annotations
 
+import unicodedata
 from xml.sax.saxutils import escape
 
 from .calibration import calibration_marks
@@ -27,6 +34,28 @@ _CUT = 3.0  # 裁切角线单臂长度 mm
 _CUT_INSET = 1.5  # 角线相对标签轮廓的外扩 mm
 _MIN_MARK = 0.5  # 残段短于该长度（mm）则整段省略
 _EPS = 1e-9
+
+# 编号文字排版参数（字号单位 mm；应用走纸校准时字号不随坐标缩放）
+_SERIAL_PADDING = 0.8  # 文字与标签轮廓的左右/上下安全留白
+_SERIAL_FS_MIN = 1.8   # 编号最小可读字号，再小即判定放不进
+_SERIAL_FS_MAX = 6.0   # 编号最大字号，避免大标签上文字过大
+_SERIAL_FS_STEP = 0.1
+
+
+def _text_width_mm(text: str, font_size: float) -> float:
+    """保守估算单行文字在 font_size(mm) 下的渲染宽度。
+
+    按字符 East Asian Width 分类：全角（中日韩字符、全角标点）按
+    1.0em，其余拉丁 / 数字 / 半角符号按 0.6em 估算。对 Arial 系字体
+    该取值偏保守，确保真实渲染不会越过估算边界。
+    """
+    units = 0.0
+    for ch in text:
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            units += 1.0
+        else:
+            units += 0.6
+    return units * font_size
 
 
 def _fmt(v: float) -> str:
@@ -152,6 +181,106 @@ def _cut_marks(
     )
 
 
+def _fit_font_size(text: str, max_w: float, max_h: float,
+                   fs_min: float, fs_max: float, step: float = _SERIAL_FS_STEP):
+    """在 max_w×max_h 内框中为单行文字选最大字号；min 字号都放不下返回 None。
+
+    行高按 1.0 个字号计（覆盖升部/降部），宽度按 _text_width_mm 保守估算。
+    """
+    fs = min(fs_max, max_h, max_w)
+    fs = round(fs / step) * step  # 向下对齐到 0.1mm 网格
+    if fs > min(fs_max, max_h, max_w) + _EPS:
+        fs -= step
+    while fs >= fs_min - _EPS:
+        if fs <= max_h + _EPS and _text_width_mm(text, fs) <= max_w + _EPS:
+            return round(fs, 2)
+        fs -= step
+    return None
+
+
+def _serial_elements(
+    lab, lx: float, ly: float, lw: float, lh: float,
+    show_annotations: bool,
+) -> str:
+    """生成一个启用流水号标签内部的 <text> 元素串。
+
+    编号始终绘制且必须放得下（放不下抛 ValueError，阻止该页 SVG 生成）；
+    名称、尺寸仅在「显示标注」打开、且宽度与垂直空间都充足时作为上下
+    小字附加，任一行放不下就自动省略。所有几何判定使用最终坐标
+    （走纸校准时即补偿后坐标），字号不随校准缩放。
+    """
+    label_name = lab.name or f"#{lab.type_index + 1}"
+    serial = lab.serial or ""
+    inner_w = max(0.0, lw - 2 * _SERIAL_PADDING)
+    if inner_w <= 0 or lh < 2 * _SERIAL_PADDING + _SERIAL_FS_MIN:
+        raise ValueError(
+            f"编号「{serial}」放不进标签「{label_name}」：标签内框仅 "
+            f"{_fmt(lw)}×{_fmt(lh)}mm，没有可供编号书写的空间。请加大标签"
+            "尺寸、缩短前缀/减小补零位数，或取消该规格的流水号。"
+        )
+
+    name_txt = (lab.name or f"#{lab.type_index + 1}")[:12]
+    if lab.rotated:
+        name_txt += " ↻"
+    size_txt = f"{_fmt(lab.width)}×{_fmt(lab.height)}"
+
+    fs_name = fs_size = None
+    if show_annotations:
+        # 附注最小 1.5mm；宽度放不下的行直接省略
+        fs_name = _fit_font_size(name_txt, inner_w, 2.0, 1.5, 2.0)
+        fs_size = _fit_font_size(size_txt, inner_w, 1.8, 1.5, 1.8)
+
+    gap = 0.3
+    top_extra = 0.0  # 编号行上方被附注占据的高度
+    if fs_name is not None:
+        top_extra += fs_name + gap
+    if fs_size is not None:
+        top_extra += fs_size + gap
+    avail_h = lh - 2 * _SERIAL_PADDING - top_extra
+    fs_serial = _fit_font_size(
+        serial, inner_w, avail_h, _SERIAL_FS_MIN,
+        min(_SERIAL_FS_MAX, avail_h),
+    )
+    if fs_serial is None:
+        # 附注挤占导致失败时，再尝试只留编号一行
+        fs_name = fs_size = None
+        avail_h = lh - 2 * _SERIAL_PADDING
+        fs_serial = _fit_font_size(
+            serial, inner_w, avail_h, _SERIAL_FS_MIN,
+            min(_SERIAL_FS_MAX, avail_h),
+        )
+    if fs_serial is None:
+        raise ValueError(
+            f"编号「{serial}」放不进标签「{label_name}」：标签内框约 "
+            f"{_fmt(lw)}×{_fmt(lh)}mm，即使以 {_SERIAL_FS_MIN:g}mm 最小字号"
+            "绘制，编号仍会越过标签边界。请缩短前缀、减小补零位数 / 起始号，"
+            "或加大标签尺寸；若正在应用打印校准，请核对实测数据（逆变换会"
+            "改变标签在纸上的可用尺寸）。"
+        )
+
+    block_h = top_extra + fs_serial
+    cx = lx + lw / 2
+    ty = ly + (lh - block_h) / 2  # 当前文字行的顶部 y
+    parts: list[str] = []
+    if fs_name is not None:
+        parts.append(
+            f'<text class="annot" x="{_fmt(cx)}" y="{_fmt(ty + fs_name * 0.8)}" '
+            f'font-size="{_fmt(fs_name)}mm">{escape(name_txt)}</text>'
+        )
+        ty += fs_name + gap
+    if fs_size is not None:
+        parts.append(
+            f'<text class="annot" x="{_fmt(cx)}" y="{_fmt(ty + fs_size * 0.8)}" '
+            f'font-size="{_fmt(fs_size)}mm">{escape(size_txt)}</text>'
+        )
+        ty += fs_size + gap
+    parts.append(
+        f'<text class="serial" x="{_fmt(cx)}" y="{_fmt(ty + fs_serial * 0.8)}" '
+        f'font-size="{_fmt(fs_serial)}mm">{escape(serial)}</text>'
+    )
+    return "".join(parts)
+
+
 def build_svg(plan: LayoutResponse, page_no: int,
               show_margins: bool = True, show_annotations: bool = True,
               show_occupied: bool = False,
@@ -196,6 +325,8 @@ def build_svg(plan: LayoutResponse, page_no: int,
             '<style>.label{fill:none;stroke:#222;stroke-width:0.15;}'
             ".annot{font-family:Arial,'Noto Sans CJK SC',sans-serif;"
             "font-size:2.2mm;fill:#9aa0a6;text-anchor:middle;}"
+            ".serial{font-family:Arial,'Noto Sans CJK SC',sans-serif;"
+            "font-weight:bold;fill:#111;text-anchor:middle;}"
             ".marginguide{fill:none;stroke:#5b8def;stroke-width:0.1;stroke-dasharray:1 1;}"
             ".pageno{font-family:Arial,sans-serif;font-size:2.5mm;fill:#9aa0a6;}</style>"
         ),
@@ -275,7 +406,13 @@ def build_svg(plan: LayoutResponse, page_no: int,
         marks = _cut_marks(lx, ly, lw, lh, paper_rect, blockers)
         if marks:
             parts.append(marks)
-        if show_annotations and min(lab.width, lab.height) >= 8:
+        if lab.serial is not None:
+            # 启用流水号：编号始终居中绘制；放不下时在此抛错，
+            # 由 /api/svg 转为 400，避免任何文字越界
+            parts.append(
+                _serial_elements(lab, lx, ly, lw, lh, show_annotations)
+            )
+        elif show_annotations and min(lab.width, lab.height) >= 8:
             name = escape((lab.name or f"#{lab.type_index + 1}")[:12])
             tag = name + (" ↻" if lab.rotated else "")
             size_txt = f"{_fmt(lab.width)}×{_fmt(lab.height)}"
