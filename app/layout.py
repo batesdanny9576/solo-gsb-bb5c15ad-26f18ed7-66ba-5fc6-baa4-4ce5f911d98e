@@ -12,6 +12,11 @@
 各外扩一个裁切间距，因此新标签无论从哪个方向接近都至少保持一个
 裁切间距。候选落点除天际线段起点外，还包括每个障碍的右缘与左缘
 锚点；某锚点与障碍重叠时把 y 抬到障碍下沿之后重试。
+
+流水号：排版完成后，对启用编号的规格按 页码 → 页内从上到下（y）
+→ 从左到右（x） 的实际位置顺序连续编号（见 serial.assign_serials）。
+旋转、首页占用区与续页只影响位置，不影响编号的连续性；未排入的
+份数不参与编号，不消耗号码。
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from .models import (
     PageLayout,
     PlacedLabel,
 )
+from .serial import assign_serials
 
 EPS = 1e-6
 
@@ -315,6 +321,10 @@ def compute_layout(req: LayoutRequest) -> LayoutResponse:
         if not progressed:
             sky = new_page()
 
+    # 流水号：按 页码 → 页内上→下 → 左→右 为启用编号的规格分配序号，
+    # 并校验编号放得进标签（放不下则整体报错，不产生排版结果）
+    serial_ranges = assign_serials(req.labels, pages)
+
     summaries = [
         LabelSummary(
             type_index=i,
@@ -325,6 +335,8 @@ def compute_layout(req: LayoutRequest) -> LayoutResponse:
             placed=placed_count[i],
             rotated=rotated_count[i],
             unplaced=spec.count - placed_count[i],
+            serial_first=serial_ranges.get(i, (None, None))[0],
+            serial_last=serial_ranges.get(i, (None, None))[1],
         )
         for i, spec in enumerate(req.labels)
     ]

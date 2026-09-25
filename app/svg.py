@@ -14,6 +14,11 @@ calibration，坐标与 /api/layout 返回完全一致。
 角线不会侵入邻签、占用区或画到纸外。判定一律在最终 SVG 坐标空间
 进行：应用走纸校准时，邻签、占用区与纸边都按逆变换补偿后的坐标
 参与避让。标签轮廓本身、排版数量与位置不随角线避让改变。
+
+流水号：启用编号的标签在内部绘制分配的编号（预览 / 下载 / 打印同一
+编号）。有名称标注时编号靠标签底边、标注上移避让；无标注时编号
+垂直居中。字号由 serial.serial_font_size 按标签内部空间折算，
+排版时已校验放得下，此处不会越界。
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from xml.sax.saxutils import escape
 
 from .calibration import calibration_marks
 from .models import Calibration, LayoutResponse
+from .serial import SERIAL_PAD, serial_font_size, serial_zone_height
 
 _CUT = 3.0  # 裁切角线单臂长度 mm
 _CUT_INSET = 1.5  # 角线相对标签轮廓的外扩 mm
@@ -196,6 +202,8 @@ def build_svg(plan: LayoutResponse, page_no: int,
             '<style>.label{fill:none;stroke:#222;stroke-width:0.15;}'
             ".annot{font-family:Arial,'Noto Sans CJK SC',sans-serif;"
             "font-size:2.2mm;fill:#9aa0a6;text-anchor:middle;}"
+            ".serial{font-family:Arial,'Noto Sans CJK SC',sans-serif;"
+            "fill:#1a1a1a;text-anchor:middle;}"
             ".marginguide{fill:none;stroke:#5b8def;stroke-width:0.1;stroke-dasharray:1 1;}"
             ".pageno{font-family:Arial,sans-serif;font-size:2.5mm;fill:#9aa0a6;}</style>"
         ),
@@ -275,7 +283,15 @@ def build_svg(plan: LayoutResponse, page_no: int,
         marks = _cut_marks(lx, ly, lw, lh, paper_rect, blockers)
         if marks:
             parts.append(marks)
-        if show_annotations and min(lab.width, lab.height) >= 8:
+        # 编号字号按设计空间标签尺寸折算（与排版时的放下校验一致；
+        # 校准只平移/缩放坐标，字号保持不变）
+        sfs = (
+            serial_font_size(lab.serial, lab.width, lab.height)
+            if lab.serial
+            else None
+        )
+        has_annot = show_annotations and min(lab.width, lab.height) >= 8
+        if has_annot:
             name = escape((lab.name or f"#{lab.type_index + 1}")[:12])
             tag = name + (" ↻" if lab.rotated else "")
             size_txt = f"{_fmt(lab.width)}×{_fmt(lab.height)}"
@@ -283,11 +299,30 @@ def build_svg(plan: LayoutResponse, page_no: int,
             if len(tag) > 8:
                 fs = 1.8
             cx, cy = lx + lw / 2, ly + lh / 2
+            if sfs is not None:
+                # 编号占据标签底部区域，标注在上方剩余区域内居中，
+                # 避免与编号重叠
+                cy = ly + (lh - serial_zone_height(sfs)) / 2
+                name_y = cy - 0.1
+                size_y = cy + min(fs, 2.0) + 0.7
+            else:
+                name_y = cy - 0.2
+                size_y = cy + fs + 0.8
             parts.append(
-                f'<text class="annot" x="{_fmt(cx)}" y="{_fmt(cy - 0.2)}" '
+                f'<text class="annot" x="{_fmt(cx)}" y="{_fmt(name_y)}" '
                 f'font-size="{_fmt(fs)}mm">{tag}</text>'
-                f'<text class="annot" x="{_fmt(cx)}" y="{_fmt(cy + fs + 0.8)}" '
+                f'<text class="annot" x="{_fmt(cx)}" y="{_fmt(size_y)}" '
                 f'font-size="{_fmt(min(fs, 2.0))}mm">{size_txt}</text>'
+            )
+        if sfs is not None:
+            scx = lx + lw / 2
+            if has_annot:
+                scy = ly + lh - SERIAL_PAD  # 标注在上，编号靠底边
+            else:
+                scy = ly + lh / 2 + sfs * 0.35  # 无标注时编号垂直居中
+            parts.append(
+                f'<text class="serial" x="{_fmt(scx)}" y="{_fmt(scy)}" '
+                f'font-size="{_fmt(sfs)}mm">{escape(lab.serial)}</text>'
             )
 
     parts.append(

@@ -32,7 +32,9 @@ def main() -> int:
         LayoutRequest,
         LabelSpec,
         OccupiedZone,
+        SerialConfig,
     )
+    from .serial import format_serial, serial_font_size
     from .svg import _fmt, build_calibration_page, build_svg
 
     import re
@@ -296,6 +298,125 @@ def main() -> int:
             sx0 < zc[2] - 1e-6 and sx1 > zc[0] + 1e-6
             and sy0 < zc[3] - 1e-6 and sy1 > zc[1] + 1e-6
         ), f"校准角线侵入补偿后占用区: {(sx0, sy0, sx1, sy1)} / {zc}"
+
+    # ---- 流水号：按位置分配、跨页/占用区/旋转不跳号不重号、未排入不占号 ----
+    # 场景：首页带占用区、允许旋转、份数跨页；编号应按
+    # 页码 → 页内上→下 → 左→右 的实际位置连续分配
+    ser_req = LayoutRequest(
+        page_width=100, page_height=80,
+        margin_top=5, margin_right=5, margin_bottom=5, margin_left=5,
+        gap_x=2, gap_y=2,
+        labels=[
+            LabelSpec(
+                name="序列品", width=28, height=14, count=30, allow_rotate=True,
+                serial=SerialConfig(prefix="SN-", start=7, pad=4),
+            ),
+            LabelSpec(name="无编号", width=20, height=10, count=5),
+        ],
+        occupied_zones=[OccupiedZone(x=30, y=5, width=30, height=20)],
+    )
+    ser_plan = compute_layout(ser_req)
+    assert len(ser_plan.pages) >= 2  # 确认场景确实跨页
+    s0 = ser_plan.summaries[0]
+    assert s0.placed == 30 and s0.unplaced == 0
+    serials = [
+        lab.serial for p in ser_plan.pages for lab in p.labels
+        if lab.type_index == 0
+    ]
+    assert all(s is not None for s in serials)
+    assert len(serials) == s0.placed
+    assert len(set(serials)) == len(serials)  # 无重号
+    # 按 (页码, y, x) 重排后必须是 SN-0007 起的连续编号（无跳号）
+    ordered = [
+        lab.serial
+        for p in ser_plan.pages
+        for lab in sorted(
+            (l for l in p.labels if l.type_index == 0),
+            key=lambda l: (l.y, l.x),
+        )
+    ]
+    expected = [format_serial("SN-", 7, 4, k) for k in range(s0.placed)]
+    assert ordered == expected, f"编号分配顺序错误: {ordered}"
+    # 汇总给出本次编号范围；末号 = 起始 + 排入数 - 1（未排入不占号）
+    assert s0.serial_first == "SN-0007"
+    assert s0.serial_last == expected[-1]
+    # 未启用编号的规格不分配序号
+    assert all(
+        lab.serial is None for p in ser_plan.pages for lab in p.labels
+        if lab.type_index == 1
+    )
+    assert ser_plan.summaries[1].serial_first is None
+    # 预览（含占用区）与下载 / 打印的 SVG 在标签内显示同一编号
+    p1_serials = [
+        lab.serial for lab in ser_plan.pages[0].labels if lab.type_index == 0
+    ]
+    ser_prev = build_svg(ser_plan, 1, show_occupied=True)
+    ser_export = build_svg(ser_plan, 1)
+    assert 'class="serial"' in ser_prev and 'class="serial"' in ser_export
+    for text in p1_serials:
+        assert text in ser_prev and text in ser_export, f"SVG 缺少编号 {text}"
+    # 未启用编号时 SVG 保持现有标注，不出现编号元素
+    plain_plan = compute_layout(LayoutRequest(
+        page_width=100, page_height=60,
+        labels=[LabelSpec(name="普通", width=30, height=20, count=2)],
+    ))
+    assert 'class="serial"' not in build_svg(plain_plan, 1)
+    # 编号中的特殊字符在 SVG 中转义
+    esc_plan = compute_layout(LayoutRequest(
+        page_width=120, page_height=60,
+        labels=[LabelSpec(
+            name="转义", width=40, height=15, count=1,
+            serial=SerialConfig(prefix="A&<", start=1, pad=0),
+        )],
+    ))
+    assert "A&amp;&lt;1" in build_svg(esc_plan, 1)
+    # 旋转标签同样参与连续编号（窄页迫使 20×8 旋转为 8×20）
+    rot_plan = compute_layout(LayoutRequest(
+        page_width=15, page_height=60,
+        labels=[LabelSpec(
+            name="旋转品", width=20, height=8, count=2, allow_rotate=True,
+            serial=SerialConfig(prefix="R-", start=1, pad=3),
+        )],
+    ))
+    rot_labels = rot_plan.pages[0].labels
+    assert all(l.rotated for l in rot_labels)
+    assert [l.serial for l in rot_labels] == ["R-001", "R-002"]
+    rot_svg = build_svg(rot_plan, 1)
+    assert "R-001" in rot_svg and "R-002" in rot_svg
+    # 启用编号但全部未排入：不消耗编号，范围为 null
+    none_placed = compute_layout(LayoutRequest(
+        page_width=50, page_height=50,
+        labels=[LabelSpec(
+            name="超大", width=80, height=80, count=2,
+            serial=SerialConfig(prefix="B", start=3, pad=2),
+        )],
+    ))
+    assert none_placed.summaries[0].placed == 0
+    assert none_placed.summaries[0].serial_first is None
+    assert none_placed.summaries[0].serial_last is None
+    # 编号放不进标签：明确中文错误，不产生排版结果（避免文字越界）
+    def _expect_serial_error(spec: LabelSpec) -> None:
+        bad = LayoutRequest(
+            page_width=100, page_height=60, labels=[spec],
+        )
+        try:
+            compute_layout(bad)
+        except ValueError as exc:
+            assert "放不进" in str(exc), str(exc)
+            return
+        raise AssertionError(f"编号放不进标签却未报错: {spec}")
+
+    _expect_serial_error(LabelSpec(
+        name="小标签", width=14, height=6, count=1,
+        serial=SerialConfig(prefix="SERIAL-NUMBER-", start=1, pad=12),
+    ))
+    _expect_serial_error(LabelSpec(
+        name="扁标签", width=40, height=2.5, count=1,
+        serial=SerialConfig(prefix="A", start=1, pad=0),
+    ))
+    # 字号折算函数本身：够大给字号、太小返回 None
+    assert serial_font_size("A-1", 30, 10) is not None
+    assert serial_font_size("X" * 30, 10, 5) is None
 
 
     print(f"[bootstrap] 自检通过（FastAPI {fastapi.__version__}, "

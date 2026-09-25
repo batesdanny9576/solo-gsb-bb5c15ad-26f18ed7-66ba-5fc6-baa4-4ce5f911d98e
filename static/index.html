@@ -9,7 +9,7 @@
 <body>
   <header class="topbar">
     <h1>小批量标签拼版工具</h1>
-    <span class="subtitle">毫米坐标 · 自动排版 · 续页 · 首张纸占用区避让 · 可打印 SVG 导出</span>
+    <span class="subtitle">毫米坐标 · 自动排版 · 续页 · 首张纸占用区避让 · 流水号 · 可打印 SVG 导出</span>
   </header>
 
   <main class="layout">
@@ -68,6 +68,9 @@
 
         <fieldset>
           <legend>标签规格</legend>
+          <p class="hint">每种标签可勾选「编号」启用流水号：前缀 + 起始整数 + 补零位数。
+            排版后按页码、页内先上后下再左后右的实际位置连续编号（未排入的份数不占号），
+            编号直接打印在标签内部；放不下时会给出明确错误。</p>
           <div id="label-rows"></div>
           <button type="button" id="add-label" class="ghost">＋ 添加一种标签</button>
         </fieldset>

@@ -25,7 +25,7 @@ from .svg import build_calibration_page, build_svg
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-app = FastAPI(title="小批量标签拼版工具", version="1.1.0")
+app = FastAPI(title="小批量标签拼版工具", version="1.2.0")
 
 
 @app.get("/health", tags=["meta"])

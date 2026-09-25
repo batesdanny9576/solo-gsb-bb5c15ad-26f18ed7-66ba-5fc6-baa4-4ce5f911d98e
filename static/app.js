@@ -11,7 +11,8 @@ let calibrationData = null;  // 已通过求解校验的校准录入（导出时
 /* ---------------- 标签行 ---------------- */
 
 function addLabelRow(spec) {
-  const data = spec || { name: "", width: 60, height: 30, count: 10, allow_rotate: false };
+  const data = spec || { name: "", width: 60, height: 30, count: 10, allow_rotate: false, serial: null };
+  const serial = data.serial || null;
   const row = document.createElement("div");
   row.className = "label-row";
   row.innerHTML = `
@@ -23,8 +24,27 @@ function addLabelRow(spec) {
       <input type="checkbox" class="l-r" ${data.allow_rotate ? "checked" : ""} />旋转
     </label>
     <button type="button" class="del" title="删除">✕</button>
+    <div class="serial-line">
+      <label class="inline" title="为该规格启用连续流水号（前缀 + 起始整数 + 补零位数）">
+        <input type="checkbox" class="l-s-on" ${serial ? "checked" : ""} />编号
+      </label>
+      <input type="text" class="l-s-prefix" placeholder="前缀（可空）" maxlength="20"
+        value="${escapeAttr(serial ? serial.prefix : "")}" title="编号前缀，可为空" />
+      <input type="number" class="l-s-start" value="${serial ? serial.start : 1}" step="1" min="0"
+        placeholder="起始" title="起始整数（≥0）" />
+      <input type="number" class="l-s-pad" value="${serial ? serial.pad : 0}" step="1" min="0" max="12"
+        placeholder="补零" title="补零位数（0 表示不补零，如 4 → 0007）" />
+    </div>
   `;
   row.querySelector(".del").addEventListener("click", () => row.remove());
+  // 未勾选「编号」时，编号参数输入框置灰（仍保留已填内容）
+  const sOn = row.querySelector(".l-s-on");
+  const sInputs = row.querySelectorAll(".l-s-prefix, .l-s-start, .l-s-pad");
+  const syncSerialInputs = () => {
+    sInputs.forEach((el) => { el.disabled = !sOn.checked; });
+  };
+  sOn.addEventListener("change", syncSerialInputs);
+  syncSerialInputs();
   $("label-rows").appendChild(row);
 }
 
@@ -67,13 +87,24 @@ function num(id) {
 }
 
 function collectParams() {
-  const labels = [...document.querySelectorAll(".label-row")].map((row) => ({
-    name: row.querySelector(".l-name").value.trim(),
-    width: parseFloat(row.querySelector(".l-w").value),
-    height: parseFloat(row.querySelector(".l-h").value),
-    count: parseInt(row.querySelector(".l-c").value, 10),
-    allow_rotate: row.querySelector(".l-r").checked,
-  }));
+  const labels = [...document.querySelectorAll(".label-row")].map((row) => {
+    const serialOn = row.querySelector(".l-s-on").checked;
+    return {
+      name: row.querySelector(".l-name").value.trim(),
+      width: parseFloat(row.querySelector(".l-w").value),
+      height: parseFloat(row.querySelector(".l-h").value),
+      count: parseInt(row.querySelector(".l-c").value, 10),
+      allow_rotate: row.querySelector(".l-r").checked,
+      // 未启用编号时传 null，后端保持现有标注、不分配序号
+      serial: serialOn
+        ? {
+            prefix: row.querySelector(".l-s-prefix").value.trim(),
+            start: parseInt(row.querySelector(".l-s-start").value, 10),
+            pad: parseInt(row.querySelector(".l-s-pad").value, 10),
+          }
+        : null,
+    };
+  });
   const occupied_zones = [...document.querySelectorAll(".zone-row")].map((row) => ({
     x: parseFloat(row.querySelector(".z-x").value),
     y: parseFloat(row.querySelector(".z-y").value),
@@ -99,6 +130,16 @@ function validateParams(p) {
   for (const [name, v] of [
     ["纸宽", p.page_width], ["纸高", p.page_height],
   ]) if (!(v > 0)) bad(`${name}必须为正数。`);
+  p.labels.forEach((l, i) => {
+    if (!l.serial) return;
+    const tag = `第 ${i + 1} 种标签「${l.name || "#" + (i + 1)}」的编号设置`;
+    if (!Number.isInteger(l.serial.start) || l.serial.start < 0) {
+      bad(`${tag}：起始编号必须是不小于 0 的整数。`);
+    }
+    if (!Number.isInteger(l.serial.pad) || l.serial.pad < 0 || l.serial.pad > 12) {
+      bad(`${tag}：补零位数必须是 0–12 的整数。`);
+    }
+  });
   for (const z of p.occupied_zones) {
     if ([z.x, z.y, z.width, z.height].some((v) => !Number.isFinite(v))) {
       bad("占用区的 X / Y / 宽 / 高必须全部填写为数字。");
@@ -170,9 +211,14 @@ function renderSummary(plan) {
     </div>
     <table>
       <thead><tr>
-        <th>标签</th><th>规格 (mm)</th><th>需求</th><th>排入</th><th>其中旋转</th><th>未排入</th>
+        <th>标签</th><th>规格 (mm)</th><th>需求</th><th>排入</th><th>其中旋转</th><th>未排入</th><th>编号范围</th>
       </tr></thead><tbody>`;
   for (const s of plan.summaries) {
+    const range = s.serial_first
+      ? (s.serial_first === s.serial_last
+          ? s.serial_first
+          : `${s.serial_first} ~ ${s.serial_last}`)
+      : "—";
     html += `<tr class="${s.unplaced > 0 ? "unplaced" : ""}">
       <td>${escapeHtml(s.name || `#${s.type_index + 1}`)}</td>
       <td>${s.width} × ${s.height}</td>
@@ -180,6 +226,7 @@ function renderSummary(plan) {
       <td>${s.placed}</td>
       <td>${s.rotated}</td>
       <td>${s.unplaced > 0 ? s.unplaced : "—"}</td>
+      <td class="serial-range">${escapeHtml(range)}</td>
     </tr>`;
   }
   html += "</tbody></table>";
@@ -446,7 +493,7 @@ $("print-all").addEventListener("click", async () => {
 
 /* ---------------- 初始数据 ---------------- */
 
-addLabelRow({ name: "品名标签", width: 60, height: 30, count: 20, allow_rotate: true });
+addLabelRow({ name: "品名标签", width: 60, height: 30, count: 20, allow_rotate: true, serial: { prefix: "PN-", start: 1, pad: 4 } });
 addLabelRow({ name: "箱贴", width: 100, height: 70, count: 6, allow_rotate: false });
 addLabelRow({ name: "小标", width: 40, height: 20, count: 50, allow_rotate: true });
 
